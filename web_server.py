@@ -437,39 +437,37 @@ class WebAvatarPipeline:
         )
         logger.info("LLM initialized")
 
-        # Initialize TTS (Piper -> Kokoro -> Local fallback chain)
-        tts_initialized = False
-
-        # Try Piper first (best free option for Linux)
-        try:
-            self.voice = PiperTTSSynthesizer(
+        # Initialize TTS with comprehensive fallback chain
+        self.voice = None
+        tts_providers = [
+            ("Piper", lambda: PiperTTSSynthesizer(
                 model=voice_settings.piper_model,
                 audio_queue=self.audio_queue,
-            )
-            logger.info("Piper TTS initialized")
-            tts_initialized = True
-        except Exception as e:
-            logger.warning(f"Piper TTS failed: {e}")
-
-        # Try Kokoro (works well on Windows/macOS)
-        if not tts_initialized:
-            try:
-                self.voice = RealtimeTTSSynthesizer(
-                    voice=voice_settings.kokoro_voice,
-                    speed=voice_settings.kokoro_speed,
-                    audio_queue=self.audio_queue,
-                )
-                logger.info("Kokoro TTS initialized")
-                tts_initialized = True
-            except Exception as e:
-                logger.warning(f"Kokoro TTS failed: {e}")
-
-        # Fall back to local TTS
-        if not tts_initialized:
-            logger.info("Using local TTS fallback")
-            self.voice = LocalVoiceSynthesizer(
+            )),
+            ("gTTS", lambda: GTTSSynthesizer(
+                lang="en",
                 audio_queue=self.audio_queue,
-            )
+            )),
+            ("Kokoro", lambda: RealtimeTTSSynthesizer(
+                voice=voice_settings.kokoro_voice,
+                speed=voice_settings.kokoro_speed,
+                audio_queue=self.audio_queue,
+            )),
+            ("Local", lambda: LocalVoiceSynthesizer(
+                audio_queue=self.audio_queue,
+            )),
+        ]
+
+        for name, factory in tts_providers:
+            try:
+                self.voice = factory()
+                logger.info(f"{name} TTS initialized successfully")
+                break
+            except Exception as e:
+                logger.warning(f"{name} TTS failed: {e}")
+
+        if self.voice is None:
+            logger.error("ALL TTS providers failed! Voice will not work.")
 
         # Initialize Face Renderer
         video_path = avatar_personality.reference_media_path
@@ -543,8 +541,11 @@ class WebAvatarPipeline:
             response = self.brain.generate(text)
 
             # Synthesize speech (this will feed audio to face renderer)
-            if response:
-                self.voice.synthesize_to_queue(response, play_audio=False)
+            if response and self.voice is not None:
+                try:
+                    self.voice.synthesize_to_queue(response, play_audio=False)
+                except Exception as e:
+                    logger.error(f"TTS synthesis failed: {e}")
 
             return response
 
