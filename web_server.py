@@ -322,6 +322,14 @@ HTML_TEMPLATE = """
             micBtn.disabled = false;
         });
 
+        // Handle audio playback from server
+        socket.on('audio_response', (data) => {
+            if (data.audio) {
+                const audio = new Audio('data:audio/wav;base64,' + data.audio);
+                audio.play().catch(err => console.log('Audio play failed:', err));
+            }
+        });
+
         function addMessage(text, type, name) {
             const msg = document.createElement('div');
             msg.className = 'message ' + type;
@@ -762,6 +770,20 @@ def handle_message(data):
     def process():
         response = avatar_pipeline.process_message(text)
         socketio.emit('response', {'text': response})
+
+        # Also synthesize and send audio to browser
+        if response and avatar_pipeline.voice is not None:
+            try:
+                # Get audio bytes from TTS
+                audio_bytes = avatar_pipeline.voice.synthesize(response)
+                if audio_bytes:
+                    # Convert to base64 and emit to browser
+                    audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                    socketio.emit('audio_response', {'audio': audio_b64})
+                    logger.info(f"Sent {len(audio_bytes)} bytes of audio to browser")
+            except Exception as e:
+                logger.warning(f"Failed to send audio to browser: {e}")
+
         socketio.emit('processing', {'status': 'Ready'})
 
     threading.Thread(target=process, daemon=True).start()
@@ -804,6 +826,17 @@ def handle_audio(data):
                 # Process the transcribed message
                 response = avatar_pipeline.process_message(text)
                 socketio.emit('response', {'text': response})
+
+                # Also synthesize and send audio to browser
+                if response and avatar_pipeline.voice is not None:
+                    try:
+                        audio_bytes = avatar_pipeline.voice.synthesize(response)
+                        if audio_bytes:
+                            audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                            socketio.emit('audio_response', {'audio': audio_b64})
+                            logger.info(f"Sent {len(audio_bytes)} bytes of audio to browser")
+                    except Exception as e:
+                        logger.warning(f"Failed to send audio to browser: {e}")
             else:
                 socketio.emit('processing', {'status': 'No speech detected'})
 
