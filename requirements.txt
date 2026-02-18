@@ -1,0 +1,98 @@
+# =============================================================================
+# AI Avatar Dependencies
+# =============================================================================
+# Install with: pip install -r requirements.txt
+#
+# For AWS Linux / EC2:
+#   ./aws_setup.sh  (handles everything automatically)
+#
+# For manual install:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Core ML/AI (PyTorch should be installed separately with CUDA)
+# -----------------------------------------------------------------------------
+# torch>=2.4.0  # Install via: pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torchaudio>=2.4.0
+# torchvision>=0.19.0
+
+# -----------------------------------------------------------------------------
+# Speech-to-Text (Whisper)
+# -----------------------------------------------------------------------------
+faster-whisper>=1.0.0
+webrtcvad-wheels>=2.0.14
+numpy>=1.24.0,<2.0.0
+
+# -----------------------------------------------------------------------------
+# LLM APIs
+# -----------------------------------------------------------------------------
+openai>=1.0.0
+groq>=0.4.0
+ollama>=0.1.0
+
+# -----------------------------------------------------------------------------
+# Text-to-Speech
+# -----------------------------------------------------------------------------
+# Piper TTS - FREE high-quality neural TTS (recommended for Linux/AWS)
+piper-tts>=1.2.0
+
+# ElevenLabs - Cloud TTS (paid, high quality)
+elevenlabs>=1.0.0
+
+# Kokoro/RealtimeTTS - Fast local TTS (Windows/macOS)
+# Note: May require additional setup on Linux
+# realtimetts[kokoro]; platform_system != "Linux"
+
+# pyttsx3 - System TTS fallback (requires espeak on Linux)
+pyttsx3>=2.90
+
+# -----------------------------------------------------------------------------
+# Audio Processing
+# -----------------------------------------------------------------------------
+sounddevice>=0.4.6
+scipy>=1.11.0
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# -----------------------------------------------------------------------------
+# Computer Vision / Video
+# -----------------------------------------------------------------------------
+# Use headless OpenCV on Linux servers (no GUI dependencies)
+opencv-python>=4.8.0; platform_system == "Windows" or platform_system == "Darwin"
+opencv-python-headless>=4.8.0; platform_system == "Linux"
+pillow>=10.0.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9
+
+# -----------------------------------------------------------------------------
+# Model Downloads & Deep Learning
+# -----------------------------------------------------------------------------
+huggingface_hub>=0.20.0
+diffusers>=0.27.0
+transformers>=4.38.0
+accelerate>=0.27.0
+peft>=0.10.0
+safetensors>=0.4.0
+einops>=0.7.0
+
+# -----------------------------------------------------------------------------
+# Configuration & Utilities
+# -----------------------------------------------------------------------------
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+rich>=13.0.0
+
+# -----------------------------------------------------------------------------
+# Web Server (for cloud/headless streaming)
+# -----------------------------------------------------------------------------
+flask>=3.0.0
+flask-socketio>=5.3.0
+simple-websocket>=1.0.0
+
+# -----------------------------------------------------------------------------
+# Testing
+# -----------------------------------------------------------------------------
+pytest>=8.0.0
