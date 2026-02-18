@@ -1163,6 +1163,219 @@ class PiperTTSSynthesizer:
 
 
 # =============================================================================
+# GTTS (Google Text-to-Speech - reliable cloud fallback)
+# =============================================================================
+
+class GTTSSynthesizer:
+    """
+    Google Text-to-Speech synthesizer - reliable cloud TTS fallback.
+
+    Features:
+    - Works on any system with internet
+    - No API key required (free)
+    - Multiple languages supported
+    - Good quality for a free service
+
+    Install: pip install gTTS
+    """
+
+    def __init__(
+        self,
+        lang: str = "en",
+        tld: str = "com",
+        output_device: Optional[int] = None,
+        audio_queue: Optional[queue.Queue] = None,
+        on_synthesis_start: Optional[Callable[[], None]] = None,
+        on_synthesis_complete: Optional[Callable[[], None]] = None,
+    ):
+        """
+        Initialize gTTS synthesizer.
+
+        Args:
+            lang: Language code (e.g., "en", "es", "fr")
+            tld: Top-level domain for accent (e.g., "com" for US, "co.uk" for UK)
+            output_device: Audio output device index
+            audio_queue: Queue for audio chunks (for face renderer)
+            on_synthesis_start: Called when synthesis starts
+            on_synthesis_complete: Called when synthesis completes
+        """
+        self.lang = lang
+        self.tld = tld
+        self.output_device = output_device
+        self.audio_queue = audio_queue or queue.Queue(maxsize=100)
+        self.on_synthesis_start = on_synthesis_start
+        self.on_synthesis_complete = on_synthesis_complete
+
+        self._synthesizing = False
+        self.sample_rate = 24000  # gTTS outputs MP3, we'll convert
+
+        # Verify gTTS is installed
+        try:
+            from gtts import gTTS
+            self._gtts_class = gTTS
+            logger.info(f"gTTS initialized (lang={lang}, tld={tld})")
+        except ImportError:
+            raise ImportError("gTTS package required. Install with: pip install gTTS")
+
+    def synthesize(self, text: str) -> bytes:
+        """
+        Synthesize text to speech.
+
+        Args:
+            text: Text to synthesize
+
+        Returns:
+            Audio data as bytes (16-bit PCM)
+        """
+        if not text.strip():
+            return b""
+
+        try:
+            import tempfile
+            import subprocess
+
+            # Generate MP3 with gTTS
+            tts = self._gtts_class(text=text, lang=self.lang, tld=self.tld)
+
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as mp3_file:
+                mp3_path = mp3_file.name
+                tts.save(mp3_path)
+
+            # Convert MP3 to PCM using ffmpeg
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as wav_file:
+                wav_path = wav_file.name
+
+            subprocess.run([
+                'ffmpeg', '-y', '-i', mp3_path,
+                '-ar', str(self.sample_rate),
+                '-ac', '1',
+                '-f', 's16le',
+                wav_path
+            ], capture_output=True, check=True)
+
+            with open(wav_path, 'rb') as f:
+                pcm_data = f.read()
+
+            # Cleanup
+            import os
+            os.unlink(mp3_path)
+            os.unlink(wav_path)
+
+            return pcm_data
+
+        except Exception as e:
+            logger.error(f"gTTS synthesis error: {e}")
+            return b""
+
+    def synthesize_to_queue(self, text: str, play_audio: bool = True):
+        """
+        Synthesize text and push audio to queue for lip-sync.
+
+        Args:
+            text: Text to synthesize
+            play_audio: Whether to play audio through speakers
+        """
+        if not text.strip():
+            return
+
+        self._synthesizing = True
+
+        if self.on_synthesis_start:
+            self.on_synthesis_start()
+
+        try:
+            import tempfile
+            import subprocess
+            import numpy as np
+
+            logger.info(f"gTTS synthesizing: {text[:50]}...")
+
+            # Generate MP3 with gTTS
+            tts = self._gtts_class(text=text, lang=self.lang, tld=self.tld)
+
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as mp3_file:
+                mp3_path = mp3_file.name
+                tts.save(mp3_path)
+
+            # Convert to raw PCM
+            with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as raw_file:
+                raw_path = raw_file.name
+
+            subprocess.run([
+                'ffmpeg', '-y', '-i', mp3_path,
+                '-ar', str(self.sample_rate),
+                '-ac', '1',
+                '-f', 's16le',
+                raw_path
+            ], capture_output=True, check=True)
+
+            with open(raw_path, 'rb') as f:
+                pcm_data = f.read()
+
+            # Cleanup temp files
+            import os
+            os.unlink(mp3_path)
+            os.unlink(raw_path)
+
+            # Send to queue in chunks
+            chunk_size = 4800  # 100ms at 24kHz
+            for i in range(0, len(pcm_data), chunk_size):
+                chunk = pcm_data[i:i + chunk_size]
+                try:
+                    self.audio_queue.put_nowait(chunk)
+                except queue.Full:
+                    logger.warning("Audio queue full, dropping chunk")
+
+            # Play audio if requested
+            if play_audio:
+                self._play_audio(pcm_data)
+
+        except Exception as e:
+            logger.error(f"gTTS TTS error: {e}")
+
+        finally:
+            self._synthesizing = False
+            # Signal end of audio
+            try:
+                self.audio_queue.put(None)
+            except:
+                pass
+
+            if self.on_synthesis_complete:
+                self.on_synthesis_complete()
+
+    def _play_audio(self, audio_bytes: bytes):
+        """Play audio data through speakers."""
+        try:
+            import sounddevice as sd
+            import numpy as np
+
+            audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
+            audio_float = audio_array.astype(np.float32) / 32767.0
+
+            sd.play(audio_float, self.sample_rate, device=self.output_device)
+            sd.wait()
+
+        except ImportError:
+            logger.warning("sounddevice not installed - cannot play audio")
+        except Exception as e:
+            logger.error(f"Audio playback error: {e}")
+
+    def synthesize_stream_async(self, text: str):
+        """Start synthesis asynchronously in a separate thread."""
+        def _run():
+            self.synthesize_to_queue(text, play_audio=True)
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+
+    @property
+    def is_synthesizing(self) -> bool:
+        """Check if currently synthesizing."""
+        return self._synthesizing
+
+
+# =============================================================================
 # REALTIME TTS (Kokoro - fast local TTS with streaming)
 # =============================================================================
 
@@ -1535,16 +1748,17 @@ def create_tts_synthesizer(
             provider = "kokoro"
 
     # Try requested provider first, then fall back
-    # Piper is the best free option, so it's high in fallback order
+    # Piper is the best free option, gTTS is a reliable cloud fallback
     fallback_order = {
-        "piper": ["piper", "kokoro", "elevenlabs", "local"],
-        "kokoro": ["kokoro", "piper", "elevenlabs", "local"],
-        "elevenlabs": ["elevenlabs", "piper", "kokoro", "local"],
-        "tortoise": ["tortoise", "piper", "elevenlabs", "local"],
-        "local": ["local", "piper"],
+        "piper": ["piper", "gtts", "kokoro", "elevenlabs", "local"],
+        "gtts": ["gtts", "piper", "elevenlabs", "local"],
+        "kokoro": ["kokoro", "piper", "gtts", "elevenlabs", "local"],
+        "elevenlabs": ["elevenlabs", "piper", "gtts", "kokoro", "local"],
+        "tortoise": ["tortoise", "piper", "gtts", "elevenlabs", "local"],
+        "local": ["local", "gtts", "piper"],
     }
 
-    providers_to_try = fallback_order.get(provider, ["piper", "local"])
+    providers_to_try = fallback_order.get(provider, ["piper", "gtts", "local"])
 
     for p in providers_to_try:
         providers_tried.append(p)
@@ -1595,6 +1809,16 @@ def create_tts_synthesizer(
                     voice=kwargs.get("tortoise_voice", "random"),
                     preset=kwargs.get("tortoise_preset", "fast"),
                     device=kwargs.get("device", "cuda"),
+                    output_device=output_device,
+                    audio_queue=audio_queue,
+                    on_synthesis_start=on_synthesis_start,
+                    on_synthesis_complete=on_synthesis_complete,
+                )
+
+            elif p == "gtts":
+                return GTTSSynthesizer(
+                    lang=kwargs.get("gtts_lang", "en"),
+                    tld=kwargs.get("gtts_tld", "com"),
                     output_device=output_device,
                     audio_queue=audio_queue,
                     on_synthesis_start=on_synthesis_start,

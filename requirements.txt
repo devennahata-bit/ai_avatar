@@ -48,6 +48,9 @@ elevenlabs>=1.0.0
 # pyttsx3 - System TTS fallback (requires espeak on Linux)
 pyttsx3>=2.90
 
+# gTTS - Google Text-to-Speech (free cloud fallback, very reliable)
+gTTS>=2.3.0
+
 # -----------------------------------------------------------------------------
 # Audio Processing
 # -----------------------------------------------------------------------------

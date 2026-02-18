@@ -63,7 +63,7 @@ from config import (
 
 # Import modules
 from modules.brain import LLMBrain
-from modules.voice import RealtimeTTSSynthesizer, LocalVoiceSynthesizer, PiperTTSSynthesizer
+from modules.voice import RealtimeTTSSynthesizer, LocalVoiceSynthesizer, PiperTTSSynthesizer, GTTSSynthesizer
 from modules.face import FaceRenderer
 from modules.listener import SpeechRecognizer
 
@@ -558,6 +558,155 @@ class WebAvatarPipeline:
         return self.ears.transcribe_file(audio_path)
 
 
+class TextOnlyPipeline:
+    """Minimal pipeline for text chat with optional voice (no face)."""
+
+    def __init__(self):
+        logger.info("Initializing text-only pipeline (with optional TTS)...")
+
+        self.audio_queue = queue.Queue(maxsize=100)
+        self.voice = None
+
+        # Initialize LLM
+        provider = llm_config.provider
+        model = getattr(llm_config, f"{provider}_model")
+
+        self.brain = LLMBrain(
+            provider=provider,
+            model=model,
+            system_prompt=avatar_personality.system_prompt,
+            max_tokens=llm_config.max_tokens,
+            temperature=llm_config.temperature,
+            groq_api_key=api_config.groq_api_key,
+            openai_api_key=api_config.openai_api_key,
+            ollama_host=api_config.ollama_host,
+        )
+        logger.info("LLM initialized")
+
+        # Try to initialize TTS (Piper preferred)
+        self._init_tts()
+
+        # Placeholder frame
+        self._placeholder_frame = self._create_placeholder()
+
+    def _init_tts(self):
+        """Try to initialize TTS with graceful fallbacks."""
+        # Try Piper first (best free option)
+        try:
+            self.voice = PiperTTSSynthesizer(
+                model=voice_settings.piper_model,
+                audio_queue=self.audio_queue,
+            )
+            logger.info("Piper TTS initialized successfully")
+            return
+        except Exception as e:
+            logger.warning(f"Piper TTS failed: {e}")
+
+        # Try ElevenLabs if API key is set
+        if api_config.elevenlabs_api_key:
+            try:
+                from modules.voice import VoiceSynthesizer
+                self.voice = VoiceSynthesizer(
+                    api_key=api_config.elevenlabs_api_key,
+                    voice_id=voice_settings.voice_id if hasattr(voice_settings, 'voice_id') else "21m00Tcm4TlvDq8ikWAM",
+                    audio_queue=self.audio_queue,
+                )
+                logger.info("ElevenLabs TTS initialized")
+                return
+            except Exception as e:
+                logger.warning(f"ElevenLabs TTS failed: {e}")
+
+        # Try gTTS (Google TTS - reliable cloud fallback, free)
+        try:
+            self.voice = GTTSSynthesizer(
+                lang="en",
+                audio_queue=self.audio_queue,
+            )
+            logger.info("gTTS (Google TTS) initialized successfully")
+            return
+        except Exception as e:
+            logger.warning(f"gTTS failed: {e}")
+
+        # Try Kokoro
+        try:
+            self.voice = RealtimeTTSSynthesizer(
+                voice=voice_settings.kokoro_voice,
+                speed=voice_settings.kokoro_speed,
+                audio_queue=self.audio_queue,
+            )
+            logger.info("Kokoro TTS initialized")
+            return
+        except Exception as e:
+            logger.warning(f"Kokoro TTS failed: {e}")
+
+        # Try local TTS
+        try:
+            self.voice = LocalVoiceSynthesizer(
+                audio_queue=self.audio_queue,
+            )
+            logger.info("Local TTS initialized")
+            return
+        except Exception as e:
+            logger.warning(f"Local TTS failed: {e}")
+
+        logger.warning("No TTS available - text responses only")
+
+    def _create_placeholder(self):
+        """Create a placeholder frame."""
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        frame[:] = (30, 30, 40)  # Dark background
+
+        # Show mode based on what's available
+        if self.voice:
+            mode_text = "Voice Mode (No Face)"
+            sub_text = "TTS enabled - audio will play"
+        else:
+            mode_text = "Text-Only Mode"
+            sub_text = "Voice & Face not available"
+
+        cv2.putText(frame, mode_text, (150, 200),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 212, 255), 2)
+        cv2.putText(frame, sub_text, (150, 260),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 1)
+        cv2.putText(frame, "Type a message to chat", (170, 320),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 1)
+        return frame
+
+    def start(self):
+        """No-op for text-only mode."""
+        pass
+
+    def stop(self):
+        """No-op for text-only mode."""
+        pass
+
+    def get_current_frame(self):
+        """Return placeholder frame."""
+        return self._placeholder_frame
+
+    def process_message(self, text: str) -> str:
+        """Process a text message and return response."""
+        global is_processing
+        is_processing = True
+        try:
+            response = self.brain.generate(text)
+
+            # Synthesize speech if TTS is available
+            if self.voice and response:
+                try:
+                    self.voice.synthesize_to_queue(response, play_audio=False)
+                except Exception as e:
+                    logger.warning(f"TTS synthesis failed: {e}")
+
+            return response
+        finally:
+            is_processing = False
+
+    def transcribe_audio(self, audio_path: str) -> str:
+        """Not available in text-only mode."""
+        raise RuntimeError("Audio transcription not available in text-only mode")
+
+
 def generate_frames():
     """Generator for MJPEG video stream."""
     while True:
@@ -692,8 +841,16 @@ def main():
         avatar_pipeline = WebAvatarPipeline()
         avatar_pipeline.start()
     except Exception as e:
-        logger.error(f"Failed to initialize pipeline: {e}")
-        logger.info("Starting in text-only mode...")
+        logger.error(f"Failed to initialize full pipeline: {e}")
+        logger.info("Starting in text-only mode (LLM chat without voice/face)...")
+
+        # Create a minimal text-only pipeline
+        try:
+            avatar_pipeline = TextOnlyPipeline()
+            logger.info("Text-only pipeline initialized successfully")
+        except Exception as e2:
+            logger.error(f"Text-only pipeline also failed: {e2}")
+            avatar_pipeline = None
 
     # Run server
     socketio.run(app, host=args.host, port=args.port, debug=False)
