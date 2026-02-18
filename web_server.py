@@ -483,6 +483,10 @@ class WebAvatarPipeline:
             fps=liveavatar_config.fps,
             device=liveavatar_config.device,
             use_fp8=liveavatar_config.use_fp8,
+            use_fp16=liveavatar_config.use_fp16,
+            multi_gpu=liveavatar_config.multi_gpu,  # Enable multi-GPU for g5.12xlarge etc
+            sampling_steps=liveavatar_config.sampling_steps,
+            infer_frames=liveavatar_config.infer_frames,
         )
         logger.info("Face renderer initialized")
 

@@ -261,8 +261,52 @@ class FaceRenderer:
             return frame
         return self._reference_face.copy()
 
+    def _get_multi_gpu_config(self) -> dict:
+        """
+        Get multi-GPU configuration for model distribution.
+
+        Optimized for g5.12xlarge (4x A10G, 24GB each) and similar setups.
+        Returns device_map and max_memory settings for accelerate.
+        """
+        import torch
+
+        if not torch.cuda.is_available():
+            return {"device_map": "cpu", "max_memory": None}
+
+        num_gpus = torch.cuda.device_count()
+        logger.info(f"Detected {num_gpus} GPU(s)")
+
+        if num_gpus <= 1:
+            logger.info("Single GPU detected, using standard loading")
+            return {"device_map": None, "max_memory": None}
+
+        # Build max_memory dict for each GPU
+        # Reserve 2GB per GPU for overhead, use rest for model
+        max_memory = {}
+        total_vram = 0
+
+        for i in range(num_gpus):
+            props = torch.cuda.get_device_properties(i)
+            vram_gb = props.total_memory / (1024**3)
+            total_vram += vram_gb
+            # Reserve 2GB for CUDA overhead, allocate rest to model
+            usable_gb = max(vram_gb - 2, vram_gb * 0.85)
+            max_memory[i] = f"{int(usable_gb)}GiB"
+            logger.info(f"GPU {i}: {props.name} - {vram_gb:.1f}GB total, allocating {usable_gb:.0f}GB")
+
+        # Also allow some CPU offloading as fallback
+        max_memory["cpu"] = "32GiB"
+
+        logger.info(f"Total VRAM across {num_gpus} GPUs: {total_vram:.1f}GB")
+        logger.info(f"Memory allocation: {max_memory}")
+
+        return {
+            "device_map": "auto",
+            "max_memory": max_memory
+        }
+
     def _try_load_liveavatar(self) -> bool:
-        """Try to load LiveAvatar models."""
+        """Try to load LiveAvatar models with multi-GPU support."""
         try:
             import torch
 
@@ -278,6 +322,29 @@ class FaceRenderer:
                 logger.warning(f"LiveAvatar LoRA weights not found at {lora_dir}")
                 return False
 
+            # Determine dtype based on settings
+            # Note: For multi-GPU, FP16 is more stable than FP8
+            if self.multi_gpu:
+                # FP16 is more compatible with multi-GPU setups
+                dtype = torch.float16
+                logger.info("Using FP16 precision (recommended for multi-GPU)")
+            elif self.use_fp8 and hasattr(torch, 'float8_e4m3fn'):
+                dtype = torch.float8_e4m3fn
+                logger.info("Using FP8 quantization")
+            elif self.use_fp16:
+                dtype = torch.float16
+                logger.info("Using FP16 precision")
+            else:
+                dtype = torch.float32
+                logger.info("Using FP32 precision")
+
+            # Get multi-GPU configuration
+            gpu_config = {"device_map": None, "max_memory": None}
+            if self.multi_gpu:
+                gpu_config = self._get_multi_gpu_config()
+                if gpu_config["device_map"]:
+                    logger.info("Multi-GPU mode enabled - splitting model across GPUs")
+
             # Try to import LiveAvatar modules
             try:
                 from liveavatar.models import WanS2VPipeline
@@ -285,64 +352,73 @@ class FaceRenderer:
 
                 logger.info("Loading WanS2V pipeline...")
 
-                # Determine dtype based on settings
-                if self.use_fp8 and hasattr(torch, 'float8_e4m3fn'):
-                    dtype = torch.float8_e4m3fn
-                    logger.info("Using FP8 quantization")
-                elif self.use_fp16:
-                    dtype = torch.float16
-                    logger.info("Using FP16 precision")
-                else:
-                    dtype = torch.float32
-                    logger.info("Using FP32 precision")
+                # Load the pipeline with multi-GPU support
+                load_kwargs = {
+                    "torch_dtype": dtype,
+                }
 
-                # Load the pipeline
-                if self.multi_gpu:
-                    # Multi-GPU: automatically split model across GPUs
-                    logger.info("Using multi-GPU mode (device_map=auto)")
-                    self._pipeline = WanS2VPipeline.from_pretrained(
-                        str(base_model_dir),
-                        torch_dtype=dtype,
-                        device_map="auto",  # Automatically distribute across GPUs
-                    )
-                else:
-                    # Single GPU
-                    self._pipeline = WanS2VPipeline.from_pretrained(
-                        str(base_model_dir),
-                        torch_dtype=dtype,
-                    )
+                if gpu_config["device_map"]:
+                    load_kwargs["device_map"] = gpu_config["device_map"]
+                    if gpu_config["max_memory"]:
+                        load_kwargs["max_memory"] = gpu_config["max_memory"]
+                    # Enable low_cpu_mem_usage to avoid OOM during loading
+                    load_kwargs["low_cpu_mem_usage"] = True
+
+                self._pipeline = WanS2VPipeline.from_pretrained(
+                    str(base_model_dir),
+                    **load_kwargs
+                )
 
                 # Load LoRA weights
                 logger.info("Loading LoRA weights...")
                 self._pipeline.load_lora_weights(str(lora_dir))
 
-                # Move to device (skip if using device_map)
-                if not self.multi_gpu:
+                # Move to device only if NOT using device_map (single GPU mode)
+                if not gpu_config["device_map"]:
                     self._pipeline = self._pipeline.to(self._device)
+
+                # Log the device distribution
+                if hasattr(self._pipeline, 'hf_device_map'):
+                    logger.info(f"Model device map: {self._pipeline.hf_device_map}")
 
                 self._liveavatar_ready = True
                 return True
 
             except ImportError as e:
                 logger.warning(f"LiveAvatar import failed: {e}")
-                logger.info("Trying alternative loading method...")
+                logger.info("Trying alternative loading method via diffusers...")
 
-                # Alternative: Try loading via diffusers
+                # Alternative: Try loading via diffusers with accelerate
                 try:
                     from diffusers import DiffusionPipeline
 
-                    if self.multi_gpu:
-                        self._pipeline = DiffusionPipeline.from_pretrained(
-                            str(base_model_dir),
-                            torch_dtype=torch.float16 if self.use_fp16 else torch.float32,
-                            device_map="auto",
-                        )
-                    else:
-                        self._pipeline = DiffusionPipeline.from_pretrained(
-                            str(base_model_dir),
-                            torch_dtype=torch.float16 if self.use_fp16 else torch.float32,
-                        )
+                    # For diffusers, use FP16 (more compatible than FP8)
+                    diffusers_dtype = torch.float16 if self.use_fp16 else torch.float32
+
+                    load_kwargs = {
+                        "torch_dtype": diffusers_dtype,
+                    }
+
+                    if gpu_config["device_map"]:
+                        load_kwargs["device_map"] = gpu_config["device_map"]
+                        if gpu_config["max_memory"]:
+                            load_kwargs["max_memory"] = gpu_config["max_memory"]
+                        load_kwargs["low_cpu_mem_usage"] = True
+
+                    logger.info(f"Loading with diffusers: {load_kwargs}")
+                    self._pipeline = DiffusionPipeline.from_pretrained(
+                        str(base_model_dir),
+                        **load_kwargs
+                    )
+
+                    # Move to device only if NOT using device_map
+                    if not gpu_config["device_map"]:
                         self._pipeline = self._pipeline.to(self._device)
+
+                    # Log device distribution
+                    if hasattr(self._pipeline, 'hf_device_map'):
+                        logger.info(f"Model device map: {self._pipeline.hf_device_map}")
+
                     self._liveavatar_ready = True
                     return True
 
@@ -352,6 +428,8 @@ class FaceRenderer:
 
         except Exception as e:
             logger.error(f"LiveAvatar loading failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
     def _setup_fallback_mode(self):
