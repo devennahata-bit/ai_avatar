@@ -1,0 +1,69 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+*.egg
+
+# Models (too large for git)
+models/
+!models/.gitkeep
+
+# Cache
+.cache/
+*.cache
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+logs/
+*.log
+
+# Temp files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Build artifacts
+dist/
+build/
+*.whl
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Audio/Video temp
+*.wav
+*.mp3
+*.mp4
+!assets/*.mp4
+!assets/*.png
+!assets/*.jpg
