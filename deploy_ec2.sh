@@ -88,7 +88,11 @@ log_info "Installing build tools..."
 if [ "$PKG_MGR" = "apt" ]; then
     $INSTALL_CMD build-essential python3-dev python3-venv git curl wget
 else
-    $INSTALL_CMD gcc gcc-c++ python3-devel git curl wget
+    # Note: Don't install 'curl' - Deep Learning AMIs have curl-minimal which conflicts
+    # curl-minimal provides the same functionality
+    $INSTALL_CMD gcc gcc-c++ python3-devel git wget || {
+        log_warning "Some packages may have failed, continuing..."
+    }
 fi
 
 # FFmpeg (critical for audio processing)

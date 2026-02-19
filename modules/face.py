@@ -305,7 +305,8 @@ class FaceRenderer:
         logger.info(f"Memory allocation: {max_memory}")
 
         return {
-            "device_map": "auto",
+            # Use "balanced" for diffusers compatibility (not "auto")
+            "device_map": "balanced",
             "max_memory": max_memory
         }
 
