@@ -67,6 +67,36 @@ from modules.voice import RealtimeTTSSynthesizer, LocalVoiceSynthesizer, PiperTT
 from modules.face import FaceRenderer
 from modules.listener import SpeechRecognizer
 
+
+def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Convert raw PCM audio data to WAV format with proper headers."""
+    import struct
+
+    # WAV header parameters
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    data_size = len(pcm_data)
+
+    # Build WAV header (44 bytes)
+    header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF',                    # ChunkID
+        36 + data_size,             # ChunkSize
+        b'WAVE',                    # Format
+        b'fmt ',                    # Subchunk1ID
+        16,                         # Subchunk1Size (PCM)
+        1,                          # AudioFormat (1 = PCM)
+        channels,                   # NumChannels
+        sample_rate,                # SampleRate
+        byte_rate,                  # ByteRate
+        block_align,                # BlockAlign
+        bits_per_sample,            # BitsPerSample
+        b'data',                    # Subchunk2ID
+        data_size                   # Subchunk2Size
+    )
+
+    return header + pcm_data
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -795,13 +825,15 @@ def handle_message(data):
         # Also synthesize and send audio to browser
         if response and avatar_pipeline.voice is not None:
             try:
-                # Get audio bytes from TTS
+                # Get audio bytes from TTS (raw PCM)
                 audio_bytes = avatar_pipeline.voice.synthesize(response)
                 if audio_bytes:
-                    # Convert to base64 and emit to browser
-                    audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                    # Convert PCM to WAV format for browser playback
+                    sample_rate = getattr(avatar_pipeline.voice, 'sample_rate', 24000)
+                    wav_bytes = pcm_to_wav(audio_bytes, sample_rate=sample_rate)
+                    audio_b64 = base64.b64encode(wav_bytes).decode('utf-8')
                     socketio.emit('audio_response', {'audio': audio_b64})
-                    logger.info(f"Sent {len(audio_bytes)} bytes of audio to browser")
+                    logger.info(f"Sent {len(wav_bytes)} bytes of audio to browser")
             except Exception as e:
                 logger.warning(f"Failed to send audio to browser: {e}")
 
@@ -853,9 +885,12 @@ def handle_audio(data):
                     try:
                         audio_bytes = avatar_pipeline.voice.synthesize(response)
                         if audio_bytes:
-                            audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                            # Convert PCM to WAV format for browser playback
+                            sample_rate = getattr(avatar_pipeline.voice, 'sample_rate', 24000)
+                            wav_bytes = pcm_to_wav(audio_bytes, sample_rate=sample_rate)
+                            audio_b64 = base64.b64encode(wav_bytes).decode('utf-8')
                             socketio.emit('audio_response', {'audio': audio_b64})
-                            logger.info(f"Sent {len(audio_bytes)} bytes of audio to browser")
+                            logger.info(f"Sent {len(wav_bytes)} bytes of audio to browser")
                     except Exception as e:
                         logger.warning(f"Failed to send audio to browser: {e}")
             else:
