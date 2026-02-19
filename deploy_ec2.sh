@@ -63,7 +63,7 @@ fi
 
 if command -v dnf &> /dev/null; then
     PKG_MGR="dnf"
-    INSTALL_CMD="sudo dnf install -y"
+    INSTALL_CMD="sudo dnf install -y --allowerasing"
 elif command -v yum &> /dev/null; then
     PKG_MGR="yum"
     INSTALL_CMD="sudo yum install -y"
@@ -97,7 +97,13 @@ if [ "$PKG_MGR" = "apt" ]; then
     $INSTALL_CMD ffmpeg
 else
     # Amazon Linux needs EPEL for ffmpeg
-    sudo dnf install -y epel-release 2>/dev/null || true
+    # AL2023 uses dnf, AL2 uses yum with amazon-linux-extras
+    if [ "$PKG_MGR" = "dnf" ]; then
+        sudo dnf install -y epel-release 2>/dev/null || true
+    else
+        sudo amazon-linux-extras install epel -y 2>/dev/null || \
+        sudo yum install -y epel-release 2>/dev/null || true
+    fi
     $INSTALL_CMD ffmpeg || {
         log_warning "FFmpeg not in repos, installing via static binary..."
         cd /tmp
@@ -123,6 +129,16 @@ if [ "$PKG_MGR" = "apt" ]; then
     $INSTALL_CMD portaudio19-dev libportaudio2
 else
     $INSTALL_CMD portaudio-devel || log_warning "PortAudio not found (optional for web mode)"
+fi
+
+# espeak-ng (for pyttsx3 fallback TTS)
+log_info "Installing espeak-ng..."
+if [ "$PKG_MGR" = "apt" ]; then
+    $INSTALL_CMD espeak-ng libespeak-ng1 || $INSTALL_CMD espeak libespeak1 || true
+else
+    $INSTALL_CMD espeak-ng espeak-ng-devel 2>/dev/null || \
+    $INSTALL_CMD espeak 2>/dev/null || \
+    log_warning "espeak-ng not found (optional - gTTS will be used as fallback)"
 fi
 
 # =============================================================================
@@ -285,6 +301,18 @@ log_success "Environment configured"
 # =============================================================================
 log_section "8. LiveAvatar Models"
 
+# Create models directory with proper permissions
+log_info "Setting up models directory..."
+mkdir -p models
+chmod 755 models
+
+# Check disk space (need ~50GB free for models + cache)
+DISK_FREE_GB=$(df -BG . | tail -1 | awk '{print $4}' | tr -d 'G')
+if [ "$DISK_FREE_GB" -lt 50 ]; then
+    log_warning "Only ${DISK_FREE_GB}GB free disk space. Models require ~50GB."
+    log_warning "Consider expanding your EBS volume if download fails."
+fi
+
 # Check GPU memory for LiveAvatar
 GPU_MEM_GB=$(python -c "
 import torch
@@ -296,6 +324,13 @@ else:
 
 if [ "$GPU_MEM_GB" -ge 48 ]; then
     log_info "GPU has ${GPU_MEM_GB}GB VRAM - LiveAvatar is supported!"
+
+    # Check for HuggingFace token
+    if [ -z "$HF_TOKEN" ] && [ -z "$HUGGING_FACE_HUB_TOKEN" ]; then
+        log_info "Tip: Set HF_TOKEN environment variable if models require authentication"
+        log_info "Get a token from: https://huggingface.co/settings/tokens"
+    fi
+
     read -p "Download LiveAvatar models (~30GB)? [y/N] " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -340,14 +375,16 @@ echo -e "  3. ${YELLOW}Start the server${NC}"
 echo "     python web_server.py --host 0.0.0.0 --port 8080"
 echo ""
 echo -e "  4. ${YELLOW}Access from browser${NC}"
-echo "     http://<your-ec2-ip>:8080"
+echo "     http://<your-ec2-ip>:8080  (text chat)"
+echo "     https://<your-domain>      (required for browser microphone)"
 echo ""
 
 # Show EC2-specific instructions
 if curl -s --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 &>/dev/null; then
     PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
     echo -e "${CYAN}Your EC2 public IP: $PUBLIC_IP${NC}"
-    echo -e "${CYAN}Access URL: http://$PUBLIC_IP:8080${NC}"
+    echo -e "${CYAN}Access URL (text chat): http://$PUBLIC_IP:8080${NC}"
+    echo -e "${CYAN}For microphone input, use HTTPS via a domain/reverse proxy.${NC}"
     echo ""
     echo -e "${YELLOW}Make sure port 8080 is open in your EC2 Security Group!${NC}"
 fi

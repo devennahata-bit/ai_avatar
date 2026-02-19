@@ -5,7 +5,7 @@ Download LiveAvatar Models
 Downloads all required model weights for LiveAvatar lip-sync.
 
 Models downloaded:
-1. Wan2.1-S2V-14B base model (~28GB) - from alibaba-pai/Wan2.1-S2V-14B-720P
+1. Wan2.2-S2V-14B base model (~28GB) - from Wan-AI/Wan2.2-S2V-14B
 2. Live-Avatar LoRA weights (~2GB) - from Quark-Vision/Live-Avatar
 3. wav2vec2 audio encoder (~400MB) - from facebook/wav2vec2-base
 
@@ -21,7 +21,6 @@ Usage:
     python download_models.py --check  # Just check what's installed
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -30,18 +29,18 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 MODELS_DIR = PROJECT_ROOT / "models"
 
 # Model directories
-LIVEAVATAR_BASE_DIR = MODELS_DIR / "Wan2.1-S2V-14B"
+LIVEAVATAR_BASE_DIR = MODELS_DIR / "Wan2.2-S2V-14B"
 LIVEAVATAR_LORA_DIR = MODELS_DIR / "Live-Avatar"
 WAV2VEC2_DIR = MODELS_DIR / "wav2vec2-base"
 
 # HuggingFace repo IDs
 MODELS = [
     {
-        "name": "Wan2.1-S2V-14B Base Model",
-        "repo_id": "alibaba-pai/Wan2.1-S2V-14B-720P",
+        "name": "Wan2.2-S2V-14B Base Model",
+        "repo_id": "Wan-AI/Wan2.2-S2V-14B",
         "local_dir": LIVEAVATAR_BASE_DIR,
         "size": "~28GB",
-        "check_file": "config.json",
+        "check_file": ["config.json", "model_index.json"],
     },
     {
         "name": "Live-Avatar LoRA Weights",
@@ -67,7 +66,10 @@ def check_model_installed(model: dict) -> bool:
         return False
 
     if model["check_file"]:
-        return (local_dir / model["check_file"]).exists()
+        check_file = model["check_file"]
+        if isinstance(check_file, (list, tuple)):
+            return any((local_dir / name).exists() for name in check_file)
+        return (local_dir / check_file).exists()
     else:
         # Check if directory has any files
         return any(local_dir.iterdir())

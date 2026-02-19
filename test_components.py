@@ -9,9 +9,22 @@ Usage:
     python test_components.py
 """
 
+# Prevent pytest from collecting this diagnostics script as a test module.
+__test__ = False
+
 import sys
 import os
+import platform
 from pathlib import Path
+
+# Fix Unicode output on Windows
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # Add project root
 sys.path.insert(0, str(Path(__file__).parent))
@@ -23,19 +36,25 @@ YELLOW = '\033[93m'
 BLUE = '\033[94m'
 RESET = '\033[0m'
 
+# Use ASCII symbols on Windows to avoid encoding issues
+IS_WINDOWS = platform.system().lower() == "windows"
+SYM_CHECK = "[OK]" if IS_WINDOWS else "✓"
+SYM_WARN = "[!]" if IS_WINDOWS else "⚠"
+SYM_ERROR = "[X]" if IS_WINDOWS else "✗"
+
 def test_section(name):
     print(f"\n{BLUE}{'='*60}{RESET}")
     print(f"{BLUE}  {name}{RESET}")
     print(f"{BLUE}{'='*60}{RESET}")
 
 def success(msg):
-    print(f"  {GREEN}✓ {msg}{RESET}")
+    print(f"  {GREEN}{SYM_CHECK} {msg}{RESET}")
 
 def warning(msg):
-    print(f"  {YELLOW}⚠ {msg}{RESET}")
+    print(f"  {YELLOW}{SYM_WARN} {msg}{RESET}")
 
 def error(msg):
-    print(f"  {RED}✗ {msg}{RESET}")
+    print(f"  {RED}{SYM_ERROR} {msg}{RESET}")
 
 def info(msg):
     print(f"  {msg}")
@@ -227,11 +246,14 @@ def main():
         errors.append("Add assets/avatar_face.png (512x512 face image)")
 
     # Check models
-    base_model = MODELS_DIR / "Wan2.1-S2V-14B"
+    base_model = MODELS_DIR / "Wan2.2-S2V-14B"
+    legacy_base_model = MODELS_DIR / "Wan2.1-S2V-14B"
     lora_model = MODELS_DIR / "Live-Avatar"
 
     if base_model.exists():
         success(f"LiveAvatar base model found: {base_model}")
+    elif legacy_base_model.exists():
+        warning(f"Using legacy local LiveAvatar base model: {legacy_base_model}")
     else:
         warning(f"LiveAvatar base model not found (will use fallback mode)")
         warnings.append("Download LiveAvatar models for lip-sync")

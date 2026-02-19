@@ -29,6 +29,8 @@ chmod +x aws_setup.sh && ./aws_setup.sh
 
 Then open `http://<your-ec2-ip>:8080` in your browser.
 
+Note: browser microphone capture requires HTTPS (or localhost). On plain HTTP, text chat still works but mic input is blocked by the browser.
+
 ## Detailed Setup
 
 ### 1. Launch EC2 Instance
@@ -83,6 +85,28 @@ cp /path/to/your/face.png assets/avatar_face.png
 
 # Or using make
 make run
+```
+
+### 6. Enable HTTPS for Browser Microphone (Recommended)
+
+Browser microphone capture only works on secure origins (`https://...`) or localhost.
+
+Prerequisites:
+- A DNS record (for example `avatar.yourdomain.com`) pointing to your EC2 public IP
+- Security group inbound rules for TCP `80` and `443`
+
+```bash
+# Start the app on localhost:8080 first
+./start.sh
+
+# In a second shell, configure Nginx + Let's Encrypt
+chmod +x setup_https_nginx.sh
+./setup_https_nginx.sh --domain avatar.yourdomain.com --email you@yourdomain.com
+```
+
+Then open:
+```text
+https://avatar.yourdomain.com
 ```
 
 ## Available Commands
@@ -191,6 +215,19 @@ curl http://localhost:8080
 
 # Check security group allows port 8080
 # AWS Console > EC2 > Security Groups > Edit inbound rules
+```
+
+### Browser microphone not working
+Browser microphone APIs require a secure context.
+
+- Works: `https://your-domain` (recommended), `http://localhost`
+- Blocked by browser: `http://<public-ec2-ip>:8080`
+
+If you need voice input from remote clients, put the app behind HTTPS (for example, Nginx + TLS).
+Use the included script:
+
+```bash
+./setup_https_nginx.sh --domain your-domain --email you@example.com
 ```
 
 ### Out of memory

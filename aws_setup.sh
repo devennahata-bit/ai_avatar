@@ -189,8 +189,16 @@ install_system_deps() {
 
             # Enable EPEL for additional packages
             if [ "$OS_ID" = "amzn" ]; then
-                sudo amazon-linux-extras install epel -y 2>/dev/null || \
-                sudo $PKG_MGR install -y epel-release || true
+                # Amazon Linux 2023 uses dnf and doesn't have amazon-linux-extras
+                # Amazon Linux 2 uses yum and has amazon-linux-extras
+                if [ "$PKG_MGR" = "dnf" ]; then
+                    # AL2023: EPEL is available directly
+                    sudo dnf install -y epel-release 2>/dev/null || true
+                else
+                    # AL2: Use amazon-linux-extras
+                    sudo amazon-linux-extras install epel -y 2>/dev/null || \
+                    sudo $PKG_MGR install -y epel-release || true
+                fi
             else
                 sudo $PKG_MGR install -y epel-release || true
             fi
@@ -361,11 +369,16 @@ except Exception as e:
     # Install pyttsx3 as fallback (uses espeak on Linux)
     pip install pyttsx3 --quiet || true
 
-    # Install espeak as fallback for pyttsx3
+    # Install espeak/espeak-ng as fallback for pyttsx3
     if command -v apt-get &> /dev/null; then
+        sudo apt-get install -y -qq espeak-ng libespeak-ng1 || \
         sudo apt-get install -y -qq espeak libespeak1 || true
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y espeak-ng espeak-ng-devel 2>/dev/null || \
+        sudo dnf install -y espeak 2>/dev/null || true
     elif command -v yum &> /dev/null; then
-        sudo yum install -y espeak || true
+        sudo yum install -y espeak-ng espeak-ng-devel 2>/dev/null || \
+        sudo yum install -y espeak 2>/dev/null || true
     fi
 
     # ElevenLabs (optional paid cloud TTS)
@@ -498,8 +511,25 @@ download_models() {
 
     source .venv/bin/activate
 
-    # Run setup wizard
-    python setup_wizard.py --skip-cuda-check
+    # Create models directory
+    mkdir -p models
+    chmod 755 models
+
+    # Check disk space
+    DISK_FREE_GB=$(df -BG . 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G' || echo "100")
+    if [ "$DISK_FREE_GB" -lt 50 ]; then
+        echo -e "${YELLOW}Warning: Only ${DISK_FREE_GB}GB free. Models require ~50GB.${NC}"
+    fi
+
+    # Check for HuggingFace token
+    if [ -z "$HF_TOKEN" ] && [ -z "$HUGGING_FACE_HUB_TOKEN" ]; then
+        echo -e "${YELLOW}Tip: Set HF_TOKEN if model downloads require authentication${NC}"
+        echo "  export HF_TOKEN=your_token_here"
+        echo "  Get token from: https://huggingface.co/settings/tokens"
+    fi
+
+    # Run setup wizard in weights-only mode
+    python setup_wizard.py --weights-only
 
     echo -e "${GREEN}Models downloaded!${NC}"
 }
@@ -612,7 +642,8 @@ print_summary() {
     echo ""
     echo "   ${CYAN}Web Server (recommended for cloud):${NC}"
     echo "   ./start.sh"
-    echo "   Then open: http://${PUBLIC_IP}:8080"
+    echo "   Then open: https://<your-domain> (recommended for browser microphone)"
+    echo "   If testing without HTTPS, text chat still works at: http://${PUBLIC_IP}:8080"
     echo ""
     echo "   ${CYAN}Headless mode:${NC}"
     echo "   ./start_headless.sh"
@@ -621,6 +652,7 @@ print_summary() {
     echo "   ./test_setup.sh"
     echo ""
     echo -e "${YELLOW}Make sure port 8080 is open in your security group!${NC}"
+    echo -e "${YELLOW}Browser microphone requires HTTPS (or localhost) due to browser security rules.${NC}"
     echo ""
 }
 

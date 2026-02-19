@@ -288,6 +288,8 @@ class AvatarPipeline:
             reference_image_path=str(avatar_personality.reference_image_path),
             reference_video_path=str(video_path) if video_path else None,
             models_dir=str(MODELS_DIR),
+            base_model_dir=str(liveavatar_config.base_model_dir),
+            lora_weights_dir=str(liveavatar_config.lora_weights_dir),
             audio_queue=self.audio_queue,
             frame_queue=self.frame_queue,
             fps=liveavatar_config.fps,

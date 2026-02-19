@@ -63,9 +63,16 @@ VENDOR_DIR = PROJECT_ROOT / "vendor"
 ASSETS_DIR = PROJECT_ROOT / "assets"
 
 # Model subdirectories
-LIVEAVATAR_BASE_DIR = MODELS_DIR / "Wan2.1-S2V-14B"
+LIVEAVATAR_BASE_DIR = MODELS_DIR / "Wan2.2-S2V-14B"
+# Keep legacy local fallback support for users who already have older weights.
+LIVEAVATAR_BASE_DIR_LEGACY = MODELS_DIR / "Wan2.1-S2V-14B"
 LIVEAVATAR_LORA_DIR = MODELS_DIR / "Live-Avatar"
 WAV2VEC2_DIR = MODELS_DIR / "wav2vec2-base"
+
+
+def _has_base_model_files(model_dir: Path) -> bool:
+    """Return True when a base model directory contains expected metadata files."""
+    return any((model_dir / name).exists() for name in ("config.json", "model_index.json"))
 
 
 # =============================================================================
@@ -287,28 +294,112 @@ def clone_liveavatar_repo() -> bool:
         return False
 
 
+def install_liveavatar_repo_deps() -> bool:
+    """Install dependencies from the cloned LiveAvatar repository."""
+    liveavatar_path = VENDOR_DIR / "LiveAvatar"
+
+    if not liveavatar_path.exists():
+        console.print("[yellow]LiveAvatar repo not found, skipping repo-specific dependencies[/yellow]")
+        return True
+
+    console.print("\n[cyan]Installing LiveAvatar repository dependencies...[/cyan]")
+
+    # Check for requirements.txt in the repo
+    req_files = [
+        liveavatar_path / "requirements.txt",
+        liveavatar_path / "requirements" / "requirements.txt",
+    ]
+
+    for req_file in req_files:
+        if req_file.exists():
+            console.print(f"[cyan]Installing from {req_file.name}...[/cyan]")
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "-r", str(req_file)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                console.print("[green]✅ LiveAvatar repo dependencies installed![/green]")
+                return True
+            except subprocess.CalledProcessError as e:
+                console.print(f"[yellow]⚠️ Warning: Some dependencies from {req_file.name} may have failed: {e}[/yellow]")
+
+    # Check for setup.py or pyproject.toml
+    if (liveavatar_path / "setup.py").exists() or (liveavatar_path / "pyproject.toml").exists():
+        console.print("[cyan]Installing LiveAvatar as a package...[/cyan]")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "-e", str(liveavatar_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            console.print("[green]✅ LiveAvatar package installed![/green]")
+            return True
+        except subprocess.CalledProcessError as e:
+            console.print(f"[yellow]⚠️ Warning: LiveAvatar package install failed: {e}[/yellow]")
+            console.print("[yellow]  Will use diffusers fallback for model loading[/yellow]")
+
+    return True
+
+
 # =============================================================================
 # STEP 4: DOWNLOAD ALL MODEL WEIGHTS
 # =============================================================================
+
+def check_disk_space(required_gb: float = 50.0) -> bool:
+    """Check if there's enough disk space for model downloads."""
+    try:
+        import shutil
+        total, used, free = shutil.disk_usage(MODELS_DIR.parent)
+        free_gb = free / (1024**3)
+        console.print(f"[dim]Disk space available: {free_gb:.1f} GB[/dim]")
+
+        if free_gb < required_gb:
+            console.print(f"[red]⚠️ Warning: Only {free_gb:.1f}GB free, need ~{required_gb}GB for models[/red]")
+            console.print("[yellow]Consider freeing up disk space or using a larger EBS volume.[/yellow]")
+            return False
+        return True
+    except Exception as e:
+        console.print(f"[yellow]Could not check disk space: {e}[/yellow]")
+        return True  # Continue anyway
+
 
 def download_all_weights() -> bool:
     """
     Download all required model weights for LiveAvatar using huggingface_hub.
 
     Required models:
-    1. Wan2.1-S2V-14B base model (~28GB)
+    1. Wan2.2-S2V-14B base model
     2. Live-Avatar LoRA weights
     3. wav2vec2 audio encoder
     """
     console.print("\n[bold blue]Step 4: Downloading Model Weights...[/bold blue]")
     console.print("[yellow]⚠️ This will download approximately 30GB of model weights.[/yellow]")
 
+    # Check disk space first
+    if not check_disk_space(50.0):
+        console.print("[yellow]Continuing anyway, but download may fail if space runs out.[/yellow]")
+
     try:
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import snapshot_download, HfFolder
     except ImportError:
         console.print("[cyan]Installing huggingface_hub...[/cyan]")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "huggingface_hub"])
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import snapshot_download, HfFolder
+
+    # Set HuggingFace cache directory for Linux (avoids permission issues)
+    if platform.system().lower() == "linux":
+        hf_cache = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+        os.environ["HF_HOME"] = hf_cache
+        console.print(f"[dim]HuggingFace cache: {hf_cache}[/dim]")
+
+    # Check for HuggingFace token (some models may require authentication)
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if hf_token:
+        console.print("[green]✓ HuggingFace token found[/green]")
+    else:
+        console.print("[dim]No HuggingFace token set (HF_TOKEN). Some models may require authentication.[/dim]")
+        console.print("[dim]Get a token from: https://huggingface.co/settings/tokens[/dim]")
 
     # Create directories
     for dir_path in [LIVEAVATAR_BASE_DIR, LIVEAVATAR_LORA_DIR, WAV2VEC2_DIR]:
@@ -316,26 +407,46 @@ def download_all_weights() -> bool:
 
     success = True
 
+    # Helper function for download with retry
+    def download_with_retry(repo_id: str, local_dir: Path, max_retries: int = 3) -> bool:
+        """Download with retry logic for network issues."""
+        import time as time_module
+        for attempt in range(max_retries):
+            try:
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=local_dir,
+                    local_dir_use_symlinks=False,
+                    token=hf_token,
+                    resume_download=True,  # Resume partial downloads
+                )
+                return True
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10  # 10s, 20s, 30s
+                    console.print(f"[yellow]  Retry {attempt + 1}/{max_retries} in {wait_time}s: {e}[/yellow]")
+                    time_module.sleep(wait_time)
+                else:
+                    raise e
+        return False
+
     # -------------------------------------------------------------------------
-    # 1. Wan2.1-S2V-14B Base Model
+    # 1. Wan2.2-S2V-14B Base Model
     # -------------------------------------------------------------------------
-    console.print("\n[cyan]1/3 Downloading Wan2.1-S2V-14B base model (~28GB)...[/cyan]")
-    console.print("[dim]This is a large download and may take a while.[/dim]")
+    console.print("\n[cyan]1/3 Downloading Wan2.2-S2V-14B base model...[/cyan]")
+    console.print("[dim]This is a large download (~25GB) and may take a while.[/dim]")
     try:
-        if (LIVEAVATAR_BASE_DIR / "config.json").exists():
+        if _has_base_model_files(LIVEAVATAR_BASE_DIR):
             console.print(f"  [dim]Already exists at {LIVEAVATAR_BASE_DIR}[/dim]")
         else:
-            snapshot_download(
-                repo_id="alibaba-pai/Wan2.1-S2V-14B-720P",
-                local_dir=LIVEAVATAR_BASE_DIR,
-                local_dir_use_symlinks=False,
-            )
-            console.print("[green]  ✅ Wan2.1-S2V-14B base model downloaded![/green]")
+            download_with_retry("Wan-AI/Wan2.2-S2V-14B", LIVEAVATAR_BASE_DIR)
+            console.print("[green]  ✅ Wan2.2-S2V-14B base model downloaded![/green]")
 
     except Exception as e:
         console.print(f"[red]  ❌ Failed to download base model: {e}[/red]")
         console.print("[yellow]  You may need to manually download from:[/yellow]")
-        console.print("  https://huggingface.co/alibaba-pai/Wan2.1-S2V-14B-720P")
+        console.print("  https://huggingface.co/Wan-AI/Wan2.2-S2V-14B")
+        console.print("[yellow]  Or set HF_TOKEN environment variable if authentication is required.[/yellow]")
         success = False
 
     # -------------------------------------------------------------------------
@@ -346,17 +457,14 @@ def download_all_weights() -> bool:
         if any(LIVEAVATAR_LORA_DIR.iterdir()) if LIVEAVATAR_LORA_DIR.exists() else False:
             console.print(f"  [dim]Already exists at {LIVEAVATAR_LORA_DIR}[/dim]")
         else:
-            snapshot_download(
-                repo_id="Quark-Vision/Live-Avatar",
-                local_dir=LIVEAVATAR_LORA_DIR,
-                local_dir_use_symlinks=False,
-            )
+            download_with_retry("Quark-Vision/Live-Avatar", LIVEAVATAR_LORA_DIR)
             console.print("[green]  ✅ Live-Avatar LoRA weights downloaded![/green]")
 
     except Exception as e:
         console.print(f"[red]  ❌ Failed to download LoRA weights: {e}[/red]")
         console.print("[yellow]  You may need to manually download from:[/yellow]")
         console.print("  https://huggingface.co/Quark-Vision/Live-Avatar")
+        console.print("[yellow]  Or set HF_TOKEN environment variable if authentication is required.[/yellow]")
         success = False
 
     # -------------------------------------------------------------------------
@@ -367,11 +475,7 @@ def download_all_weights() -> bool:
         if (WAV2VEC2_DIR / "config.json").exists():
             console.print(f"  [dim]Already exists at {WAV2VEC2_DIR}[/dim]")
         else:
-            snapshot_download(
-                repo_id="facebook/wav2vec2-base",
-                local_dir=WAV2VEC2_DIR,
-                local_dir_use_symlinks=False,
-            )
+            download_with_retry("facebook/wav2vec2-base", WAV2VEC2_DIR)
             console.print("[green]  ✅ wav2vec2 audio encoder downloaded![/green]")
 
     except Exception as e:
@@ -506,8 +610,14 @@ def verify_installation() -> bool:
     )
 
     # Check model weights
+    if LIVEAVATAR_BASE_DIR.exists():
+        base_model_name = "Wan2.2-S2V-14B Base"
+        base_model_path = LIVEAVATAR_BASE_DIR
+    else:
+        base_model_name = "Wan2.2-S2V-14B Base (legacy local Wan2.1 fallback)"
+        base_model_path = LIVEAVATAR_BASE_DIR_LEGACY
     weights_checks = [
-        ("Wan2.1-S2V-14B Base", LIVEAVATAR_BASE_DIR, ["config.json"]),
+        (base_model_name, base_model_path, ["config.json", "model_index.json"]),
         ("Live-Avatar LoRA", LIVEAVATAR_LORA_DIR, []),
         ("wav2vec2 Encoder", WAV2VEC2_DIR, ["config.json"]),
     ]
@@ -515,7 +625,11 @@ def verify_installation() -> bool:
     for name, path, required_files in weights_checks:
         if path.exists():
             if required_files:
-                missing = [f for f in required_files if not (path / f).exists()]
+                # Base model metadata may vary by repo version.
+                if "config.json" in required_files and "model_index.json" in required_files:
+                    missing = [] if _has_base_model_files(path) else ["config.json|model_index.json"]
+                else:
+                    missing = [f for f in required_files if not (path / f).exists()]
                 if missing:
                     table.add_row(name, "⚠️", f"Missing: {', '.join(missing)}")
                 else:
@@ -601,6 +715,9 @@ def main():
         if not clone_liveavatar_repo():
             all_success = False
             console.print("[yellow]⚠️ LiveAvatar clone failed. Weights download may still work.[/yellow]")
+
+        # Step 3b: Install LiveAvatar repo dependencies
+        install_liveavatar_repo_deps()
 
     # Step 4: Download Weights
     if not download_all_weights():

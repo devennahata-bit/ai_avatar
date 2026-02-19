@@ -49,6 +49,8 @@ class FaceRenderer:
         self,
         reference_image_path: str,
         models_dir: str,
+        base_model_dir: Optional[str] = None,
+        lora_weights_dir: Optional[str] = None,
         audio_queue: Optional[queue.Queue] = None,
         frame_queue: Optional[queue.Queue] = None,
         fps: int = 24,
@@ -88,6 +90,8 @@ class FaceRenderer:
         self.reference_image_path = Path(reference_image_path)
         self.reference_video_path = Path(reference_video_path) if reference_video_path else None
         self.models_dir = Path(models_dir)
+        self.base_model_dir = Path(base_model_dir) if base_model_dir else (self.models_dir / "Wan2.2-S2V-14B")
+        self.lora_weights_dir = Path(lora_weights_dir) if lora_weights_dir else (self.models_dir / "Live-Avatar")
         self.fps = fps
         self.output_width = output_width
         self.output_height = output_height
@@ -310,16 +314,19 @@ class FaceRenderer:
         try:
             import torch
 
-            # Check for model directories
-            base_model_dir = self.models_dir / "Wan2.1-S2V-14B"
-            lora_dir = self.models_dir / "Live-Avatar"
+            # Try configured base model first, then a legacy local location.
+            candidate_base_dirs = [self.base_model_dir]
+            legacy_base_model_dir = self.models_dir / "Wan2.1-S2V-14B"
+            if legacy_base_model_dir not in candidate_base_dirs:
+                candidate_base_dirs.append(legacy_base_model_dir)
 
-            if not base_model_dir.exists():
-                logger.warning(f"LiveAvatar base model not found at {base_model_dir}")
+            available_base_dirs = [p for p in candidate_base_dirs if p.exists()]
+            if not available_base_dirs:
+                logger.warning(f"LiveAvatar base model not found. Tried: {candidate_base_dirs}")
                 return False
 
-            if not lora_dir.exists():
-                logger.warning(f"LiveAvatar LoRA weights not found at {lora_dir}")
+            if not self.lora_weights_dir.exists():
+                logger.warning(f"LiveAvatar LoRA weights not found at {self.lora_weights_dir}")
                 return False
 
             # Determine dtype based on settings
@@ -345,86 +352,70 @@ class FaceRenderer:
                 if gpu_config["device_map"]:
                     logger.info("Multi-GPU mode enabled - splitting model across GPUs")
 
-            # Try to import LiveAvatar modules
-            try:
-                from liveavatar.models import WanS2VPipeline
-                from peft import PeftModel
-
-                logger.info("Loading WanS2V pipeline...")
-
-                # Load the pipeline with multi-GPU support
-                load_kwargs = {
-                    "torch_dtype": dtype,
-                }
-
-                if gpu_config["device_map"]:
-                    load_kwargs["device_map"] = gpu_config["device_map"]
-                    if gpu_config["max_memory"]:
-                        load_kwargs["max_memory"] = gpu_config["max_memory"]
-                    # Enable low_cpu_mem_usage to avoid OOM during loading
-                    load_kwargs["low_cpu_mem_usage"] = True
-
-                self._pipeline = WanS2VPipeline.from_pretrained(
-                    str(base_model_dir),
-                    **load_kwargs
-                )
-
-                # Load LoRA weights
-                logger.info("Loading LoRA weights...")
-                self._pipeline.load_lora_weights(str(lora_dir))
-
-                # Move to device only if NOT using device_map (single GPU mode)
-                if not gpu_config["device_map"]:
-                    self._pipeline = self._pipeline.to(self._device)
-
-                # Log the device distribution
-                if hasattr(self._pipeline, 'hf_device_map'):
-                    logger.info(f"Model device map: {self._pipeline.hf_device_map}")
-
-                self._liveavatar_ready = True
-                return True
-
-            except ImportError as e:
-                logger.warning(f"LiveAvatar import failed: {e}")
-                logger.info("Trying alternative loading method via diffusers...")
-
-                # Alternative: Try loading via diffusers with accelerate
+            for base_model_dir in available_base_dirs:
                 try:
-                    from diffusers import DiffusionPipeline
+                    # Try to import LiveAvatar modules
+                    try:
+                        from liveavatar.models import WanS2VPipeline
 
-                    # For diffusers, use FP16 (more compatible than FP8)
-                    diffusers_dtype = torch.float16 if self.use_fp16 else torch.float32
+                        logger.info(f"Loading WanS2V pipeline from {base_model_dir}...")
 
-                    load_kwargs = {
-                        "torch_dtype": diffusers_dtype,
-                    }
+                        load_kwargs = {"torch_dtype": dtype}
+                        if gpu_config["device_map"]:
+                            load_kwargs["device_map"] = gpu_config["device_map"]
+                            if gpu_config["max_memory"]:
+                                load_kwargs["max_memory"] = gpu_config["max_memory"]
+                            load_kwargs["low_cpu_mem_usage"] = True
 
-                    if gpu_config["device_map"]:
-                        load_kwargs["device_map"] = gpu_config["device_map"]
-                        if gpu_config["max_memory"]:
-                            load_kwargs["max_memory"] = gpu_config["max_memory"]
-                        load_kwargs["low_cpu_mem_usage"] = True
+                        self._pipeline = WanS2VPipeline.from_pretrained(
+                            str(base_model_dir),
+                            **load_kwargs
+                        )
 
-                    logger.info(f"Loading with diffusers: {load_kwargs}")
-                    self._pipeline = DiffusionPipeline.from_pretrained(
-                        str(base_model_dir),
-                        **load_kwargs
-                    )
+                        logger.info("Loading LoRA weights...")
+                        self._pipeline.load_lora_weights(str(self.lora_weights_dir))
 
-                    # Move to device only if NOT using device_map
-                    if not gpu_config["device_map"]:
-                        self._pipeline = self._pipeline.to(self._device)
+                        if not gpu_config["device_map"]:
+                            self._pipeline = self._pipeline.to(self._device)
 
-                    # Log device distribution
-                    if hasattr(self._pipeline, 'hf_device_map'):
-                        logger.info(f"Model device map: {self._pipeline.hf_device_map}")
+                        if hasattr(self._pipeline, 'hf_device_map'):
+                            logger.info(f"Model device map: {self._pipeline.hf_device_map}")
 
-                    self._liveavatar_ready = True
-                    return True
+                        self._liveavatar_ready = True
+                        return True
 
+                    except ImportError as e:
+                        logger.warning(f"LiveAvatar import failed: {e}")
+                        logger.info("Trying alternative loading method via diffusers...")
+
+                        from diffusers import DiffusionPipeline
+
+                        diffusers_dtype = torch.float16 if self.use_fp16 else torch.float32
+                        load_kwargs = {"torch_dtype": diffusers_dtype}
+                        if gpu_config["device_map"]:
+                            load_kwargs["device_map"] = gpu_config["device_map"]
+                            if gpu_config["max_memory"]:
+                                load_kwargs["max_memory"] = gpu_config["max_memory"]
+                            load_kwargs["low_cpu_mem_usage"] = True
+
+                        logger.info(f"Loading with diffusers from {base_model_dir}: {load_kwargs}")
+                        self._pipeline = DiffusionPipeline.from_pretrained(
+                            str(base_model_dir),
+                            **load_kwargs
+                        )
+
+                        if not gpu_config["device_map"]:
+                            self._pipeline = self._pipeline.to(self._device)
+
+                        if hasattr(self._pipeline, 'hf_device_map'):
+                            logger.info(f"Model device map: {self._pipeline.hf_device_map}")
+
+                        self._liveavatar_ready = True
+                        return True
                 except Exception as e2:
-                    logger.error(f"Alternative loading also failed: {e2}")
-                    return False
+                    logger.error(f"Failed to load LiveAvatar from {base_model_dir}: {e2}")
+
+            return False
 
         except Exception as e:
             logger.error(f"LiveAvatar loading failed: {e}")

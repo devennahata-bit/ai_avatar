@@ -25,7 +25,37 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 IS_LINUX = platform.system().lower() == "linux"
 IS_WINDOWS = platform.system().lower() == "windows"
 IS_MACOS = platform.system().lower() == "darwin"
-IS_AWS = os.environ.get("AWS_EXECUTION_ENV") is not None or Path("/sys/hypervisor/uuid").exists()
+
+def _detect_aws() -> bool:
+    """Detect if running on AWS EC2 (works for both Xen and Nitro instances)."""
+    # Check environment variable (set by Lambda, ECS, etc.)
+    if os.environ.get("AWS_EXECUTION_ENV") is not None:
+        return True
+    # Check for AWS-specific metadata service availability marker
+    if os.environ.get("AWS_DEFAULT_REGION") is not None:
+        return True
+    # Check for Xen-based EC2 (older instances)
+    if Path("/sys/hypervisor/uuid").exists():
+        return True
+    # Check for Nitro-based EC2 (newer instances like g5, p4, p5)
+    if Path("/sys/devices/virtual/dmi/id/board_vendor").exists():
+        try:
+            vendor = Path("/sys/devices/virtual/dmi/id/board_vendor").read_text().strip()
+            if "Amazon" in vendor:
+                return True
+        except Exception:
+            pass
+    # Check system vendor for EC2
+    if Path("/sys/devices/virtual/dmi/id/sys_vendor").exists():
+        try:
+            vendor = Path("/sys/devices/virtual/dmi/id/sys_vendor").read_text().strip()
+            if "Amazon" in vendor:
+                return True
+        except Exception:
+            pass
+    return False
+
+IS_AWS = _detect_aws()
 IS_HEADLESS = os.environ.get("DISPLAY") is None and IS_LINUX
 
 
@@ -244,7 +274,7 @@ class LiveAvatarConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LIVEAVATAR_")
 
     # Model paths (relative to MODELS_DIR)
-    base_model_dir: Path = Field(default=MODELS_DIR / "Wan2.1-S2V-14B")
+    base_model_dir: Path = Field(default=MODELS_DIR / "Wan2.2-S2V-14B")
     lora_weights_dir: Path = Field(default=MODELS_DIR / "Live-Avatar")
     audio_encoder_dir: Path = Field(default=MODELS_DIR / "wav2vec2-base")
 
@@ -396,8 +426,9 @@ def validate_config() -> list[str]:
         issues.append(f"WARNING: No avatar media found. Add avatar.mp4 or avatar_face.png to assets/")
 
     # Check model directories
-    if not liveavatar_config.base_model_dir.exists():
-        issues.append(f"WARNING: LiveAvatar base model not found - run setup_wizard.py first")
+    legacy_base_model_dir = MODELS_DIR / "Wan2.1-S2V-14B"
+    if not liveavatar_config.base_model_dir.exists() and not legacy_base_model_dir.exists():
+        issues.append("WARNING: LiveAvatar base model not found - run setup_wizard.py first")
     if not liveavatar_config.lora_weights_dir.exists():
         issues.append(f"WARNING: LiveAvatar LoRA weights not found - run setup_wizard.py first")
 

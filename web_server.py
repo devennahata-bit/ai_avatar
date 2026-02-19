@@ -293,6 +293,7 @@ HTML_TEMPLATE = """
         socket.on('connect', () => {
             status.textContent = 'Connected';
             status.className = 'status connected';
+            updateMicAvailability();
         });
 
         socket.on('disconnect', () => {
@@ -361,6 +362,12 @@ HTML_TEMPLATE = """
 
         async function startRecording() {
             try {
+                if (!window.isSecureContext) {
+                    status.textContent = 'Mic requires HTTPS (or localhost)';
+                    status.className = 'status disconnected';
+                    return;
+                }
+
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
                 audioChunks = [];
@@ -387,6 +394,18 @@ HTML_TEMPLATE = """
                 console.error('Microphone access denied:', err);
                 status.textContent = 'Mic access denied';
                 status.className = 'status disconnected';
+            }
+        }
+
+        function updateMicAvailability() {
+            if (!window.isSecureContext) {
+                micBtn.disabled = true;
+                micBtn.title = 'Microphone requires HTTPS (or localhost)';
+                status.textContent = 'Connected (mic disabled: use HTTPS for voice)';
+                status.className = 'status disconnected';
+            } else {
+                micBtn.disabled = false;
+                micBtn.title = 'Hold to speak';
             }
         }
 
@@ -486,6 +505,8 @@ class WebAvatarPipeline:
             reference_image_path=str(avatar_personality.reference_image_path),
             reference_video_path=str(video_path) if video_path else None,
             models_dir=str(MODELS_DIR),
+            base_model_dir=str(liveavatar_config.base_model_dir),
+            lora_weights_dir=str(liveavatar_config.lora_weights_dir),
             audio_queue=self.audio_queue,
             frame_queue=self.frame_queue,
             fps=liveavatar_config.fps,
